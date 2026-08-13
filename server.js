@@ -10,6 +10,7 @@ const PORT = Number(process.env.PORT || 3001);
 const SERVICE_TOKEN = process.env.WA_SERVICE_TOKEN || 'change-me';
 const SESSION_DIR = process.env.WA_SESSION_DIR || '.wwebjs';
 const CHROME_BIN = process.env.WA_BROWSER_PATH || '/usr/bin/chromium';
+const QR_TTL_MS = Number(process.env.WA_QR_TTL_MS || 30000);
 
 app.use(cors({ origin: true, credentials: true }));
 app.use(express.json({ limit: '2mb' }));
@@ -38,6 +39,7 @@ function createSessionState(key) {
   const state = {
     key,
     qrData: null,
+    qrGeneratedAt: null,
     isReady: false,
     lastError: null,
     lastConnectedAt: null,
@@ -55,6 +57,7 @@ function createSessionState(key) {
 
   state.client.on('qr', (qr) => {
     state.qrData = qr;
+    state.qrGeneratedAt = Date.now();
     state.isReady = false;
     state.lastError = null;
     console.log(`[WA:${key}] QR generated, please scan with WhatsApp mobile app`);
@@ -91,6 +94,22 @@ function getSessionState(userId) {
   }
 
   return sessionStates.get(key);
+}
+
+function rotateStaleQR(userId) {
+  const key = normalizeUserKey(userId);
+  if (!key) return null;
+
+  const state = getSessionState(key);
+  if (!state || state.isReady) return state;
+
+  const now = Date.now();
+  if (!state.qrGeneratedAt || now - state.qrGeneratedAt <= QR_TTL_MS) {
+    return state;
+  }
+
+  console.log(`[WA:${key}] QR expired after ${QR_TTL_MS}ms, recreating session`);
+  return recreateSessionState(key);
 }
 
 function recreateSessionState(userId) {
@@ -170,7 +189,7 @@ app.get('/health', (_, res) => {
 });
 
 app.get('/api/wa/status', requireToken, (req, res) => {
-  const state = getSessionState(req.userId);
+  const state = rotateStaleQR(req.userId) || getSessionState(req.userId);
   res.json({
     ok: true,
     ready: state.isReady,
@@ -182,7 +201,7 @@ app.get('/api/wa/status', requireToken, (req, res) => {
 });
 
 app.get('/api/wa/qr', requireToken, async (req, res) => {
-  const state = getSessionState(req.userId);
+  const state = rotateStaleQR(req.userId) || getSessionState(req.userId);
   if (!state.qrData) {
     return res.json({ ok: true, qr: null, user_id: req.userId, error: null });
   }
