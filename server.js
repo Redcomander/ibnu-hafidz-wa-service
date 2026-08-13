@@ -26,65 +26,94 @@ function sleep(ms) {
 
 function normalizeUserKey(userId) {
   if (userId === undefined || userId === null || userId === '') {
-    return 'shared';
+    return null;
   }
-  return String(userId).trim();
+
+  const cleaned = String(userId).trim();
+  return cleaned || null;
+}
+
+function createSessionState(key) {
+  const sessionDir = path.join(SESSION_DIR, key);
+  const state = {
+    key,
+    qrData: null,
+    isReady: false,
+    lastError: null,
+    lastConnectedAt: null,
+    client: null,
+  };
+
+  state.client = new Client({
+    authStrategy: new LocalAuth({ dataPath: sessionDir }),
+    puppeteer: {
+      headless: true,
+      executablePath: fs.existsSync(CHROME_BIN) ? CHROME_BIN : undefined,
+      args: ['--no-sandbox', '--disable-setuid-sandbox', '--disable-dev-shm-usage'],
+    },
+  });
+
+  state.client.on('qr', (qr) => {
+    state.qrData = qr;
+    state.isReady = false;
+    state.lastError = null;
+    console.log(`[WA:${key}] QR generated, please scan with WhatsApp mobile app`);
+  });
+
+  state.client.on('ready', () => {
+    state.qrData = null;
+    state.isReady = true;
+    state.lastError = null;
+    state.lastConnectedAt = new Date().toISOString();
+    console.log(`[WA:${key}] WhatsApp client is ready`);
+  });
+
+  state.client.on('auth_failure', (msg) => {
+    state.isReady = false;
+    state.lastError = msg?.message || 'WhatsApp auth failed';
+    console.error(`[WA:${key}] Auth failure:`, state.lastError);
+  });
+
+  state.client.on('disconnected', () => {
+    state.isReady = false;
+    state.lastError = 'WhatsApp disconnected';
+    console.warn(`[WA:${key}] WhatsApp disconnected`);
+  });
+
+  state.client.initialize();
+  return state;
 }
 
 function getSessionState(userId) {
   const key = normalizeUserKey(userId);
   if (!sessionStates.has(key)) {
-    const sessionDir = path.join(SESSION_DIR, key);
-    const state = {
-      key,
-      qrData: null,
-      isReady: false,
-      lastError: null,
-      lastConnectedAt: null,
-      client: null,
-    };
-
-    state.client = new Client({
-      authStrategy: new LocalAuth({ dataPath: sessionDir }),
-      puppeteer: {
-        headless: true,
-        executablePath: fs.existsSync(CHROME_BIN) ? CHROME_BIN : undefined,
-        args: ['--no-sandbox', '--disable-setuid-sandbox', '--disable-dev-shm-usage'],
-      },
-    });
-
-    state.client.on('qr', (qr) => {
-      state.qrData = qr;
-      state.isReady = false;
-      state.lastError = null;
-      console.log(`[WA:${key}] QR generated, please scan with WhatsApp mobile app`);
-    });
-
-    state.client.on('ready', () => {
-      state.qrData = null;
-      state.isReady = true;
-      state.lastError = null;
-      state.lastConnectedAt = new Date().toISOString();
-      console.log(`[WA:${key}] WhatsApp client is ready`);
-    });
-
-    state.client.on('auth_failure', (msg) => {
-      state.isReady = false;
-      state.lastError = msg?.message || 'WhatsApp auth failed';
-      console.error(`[WA:${key}] Auth failure:`, state.lastError);
-    });
-
-    state.client.on('disconnected', () => {
-      state.isReady = false;
-      state.lastError = 'WhatsApp disconnected';
-      console.warn(`[WA:${key}] WhatsApp disconnected`);
-    });
-
-    state.client.initialize();
-    sessionStates.set(key, state);
+    sessionStates.set(key, createSessionState(key));
   }
 
   return sessionStates.get(key);
+}
+
+function recreateSessionState(userId) {
+  const key = normalizeUserKey(userId);
+  const existing = sessionStates.get(key);
+
+  if (existing && existing.client && typeof existing.client.destroy === 'function') {
+    try {
+      existing.client.destroy();
+    } catch (error) {
+      console.warn(`[WA:${key}] destroy failed:`, error.message);
+    }
+  }
+
+  try {
+    fs.rmSync(path.join(SESSION_DIR, key), { recursive: true, force: true });
+  } catch (error) {
+    console.warn(`[WA:${key}] session cleanup failed:`, error.message);
+  }
+
+  const nextState = createSessionState(key);
+  sessionStates.set(key, nextState);
+  return nextState;
 }
 
 async function simulateTyping(chat, text) {
@@ -124,7 +153,15 @@ function requireToken(req, res, next) {
   }
 
   const userId = req.headers['x-user-id'] || req.headers['x-user'];
-  req.userId = normalizeUserKey(userId);
+  const normalizedUserId = normalizeUserKey(userId);
+  if (!normalizedUserId) {
+    return res.status(401).json({
+      error: 'missing_user_id',
+      message: 'X-User-ID header is required to bind the WA session to the authenticated user',
+    });
+  }
+
+  req.userId = normalizedUserId;
   next();
 }
 
@@ -147,7 +184,7 @@ app.get('/api/wa/status', requireToken, (req, res) => {
 app.get('/api/wa/qr', requireToken, async (req, res) => {
   const state = getSessionState(req.userId);
   if (!state.qrData) {
-    return res.status(404).json({ error: 'qr_not_ready', message: 'QR not generated yet' });
+    return res.json({ ok: true, qr: null, user_id: req.userId, error: null });
   }
 
   try {
@@ -171,7 +208,9 @@ app.post('/api/wa/session/disconnect', requireToken, async (req, res) => {
       await state.client.logout();
     }
 
-    return res.json({ ok: true, user_id: req.userId, message: 'WA session disconnected' });
+    recreateSessionState(req.userId);
+
+    return res.json({ ok: true, user_id: req.userId, message: 'WA session disconnected', refreshed: true });
   } catch (error) {
     return res.status(500).json({ error: 'disconnect_failed', message: error.message });
   }
