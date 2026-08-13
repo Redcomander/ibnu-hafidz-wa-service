@@ -1,0 +1,9 @@
+deployment:
+  tasks:
+    - export PATH=/opt/cpanel/ea-nodejs22/bin:$PATH
+    - cd $DEPLOY_DIR
+    - test -f .env || cp .env.example .env
+    - npm ci --omit=dev || npm install --omit=dev
+    - npx pm2 restart wa-service || npx pm2 start server.js --name wa-service
+    - npx pm2 save
+    - curl -fsS http://localhost:3001/health
