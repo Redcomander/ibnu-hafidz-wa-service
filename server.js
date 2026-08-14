@@ -10,7 +10,7 @@ const PORT = Number(process.env.PORT || 3001);
 const SERVICE_TOKEN = process.env.WA_SERVICE_TOKEN || 'change-me';
 const SESSION_DIR = process.env.WA_SESSION_DIR || '.wwebjs';
 const CHROME_BIN = process.env.WA_BROWSER_PATH || '/usr/bin/chromium';
-const QR_TTL_MS = Number(process.env.WA_QR_TTL_MS || 30000);
+const QR_TTL_MS = Number(process.env.WA_QR_TTL_MS || 300000);
 
 app.use(cors({ origin: true, credentials: true }));
 app.use(express.json({ limit: '2mb' }));
@@ -32,6 +32,30 @@ function normalizeUserKey(userId) {
 
   const cleaned = String(userId).trim();
   return cleaned || null;
+}
+
+function getClientConnectionState(state) {
+  if (!state || !state.client || typeof state.client.getState !== 'function') {
+    return false;
+  }
+
+  const clientState = state.client.getState();
+  return clientState === 'CONNECTED';
+}
+
+function syncReadyState(state) {
+  if (!state) return false;
+
+  if (getClientConnectionState(state)) {
+    state.isReady = true;
+    state.lastError = null;
+    if (!state.lastConnectedAt) {
+      state.lastConnectedAt = new Date().toISOString();
+    }
+    return true;
+  }
+
+  return state.isReady;
 }
 
 function createSessionState(key) {
@@ -71,6 +95,12 @@ function createSessionState(key) {
     console.log(`[WA:${key}] WhatsApp client is ready`);
   });
 
+  state.client.on('authenticated', () => {
+    state.isReady = false;
+    state.lastError = null;
+    console.log(`[WA:${key}] WhatsApp authentication succeeded, waiting for final ready state`);
+  });
+
   state.client.on('auth_failure', (msg) => {
     state.isReady = false;
     state.lastError = msg?.message || 'WhatsApp auth failed';
@@ -101,7 +131,10 @@ function rotateStaleQR(userId) {
   if (!key) return null;
 
   const state = getSessionState(key);
-  if (!state || state.isReady) return state;
+  if (!state) return null;
+
+  syncReadyState(state);
+  if (state.isReady || getClientConnectionState(state)) return state;
 
   const now = Date.now();
   if (!state.qrGeneratedAt || now - state.qrGeneratedAt <= QR_TTL_MS) {
@@ -190,6 +223,8 @@ app.get('/health', (_, res) => {
 
 app.get('/api/wa/status', requireToken, (req, res) => {
   const state = rotateStaleQR(req.userId) || getSessionState(req.userId);
+  syncReadyState(state);
+
   res.json({
     ok: true,
     ready: state.isReady,
@@ -202,6 +237,8 @@ app.get('/api/wa/status', requireToken, (req, res) => {
 
 app.get('/api/wa/qr', requireToken, async (req, res) => {
   const state = rotateStaleQR(req.userId) || getSessionState(req.userId);
+  syncReadyState(state);
+
   if (!state.qrData) {
     return res.json({ ok: true, qr: null, user_id: req.userId, error: null });
   }
