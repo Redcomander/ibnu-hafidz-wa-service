@@ -41,6 +41,7 @@ function createSessionState(key) {
     qrData: null,
     qrGeneratedAt: null,
     isReady: false,
+    isAuthenticated: false,
     lastError: null,
     lastConnectedAt: null,
     client: null,
@@ -59,6 +60,7 @@ function createSessionState(key) {
     state.qrData = qr;
     state.qrGeneratedAt = Date.now();
     state.isReady = false;
+    state.isAuthenticated = false;
     state.lastError = null;
     console.log(`[WA:${key}] QR generated, please scan with WhatsApp mobile app`);
   });
@@ -66,25 +68,30 @@ function createSessionState(key) {
   state.client.on('ready', () => {
     state.qrData = null;
     state.isReady = true;
+    state.isAuthenticated = true;
     state.lastError = null;
     state.lastConnectedAt = new Date().toISOString();
     console.log(`[WA:${key}] WhatsApp client is ready`);
   });
 
   state.client.on('authenticated', () => {
+    state.qrData = null;
     state.isReady = false;
+    state.isAuthenticated = true;
     state.lastError = null;
-    console.log(`[WA:${key}] WhatsApp authentication succeeded, waiting for final ready state`);
+    console.log(`[WA:${key}] WhatsApp authentication succeeded, session is connected on the phone`);
   });
 
   state.client.on('auth_failure', (msg) => {
     state.isReady = false;
+    state.isAuthenticated = false;
     state.lastError = msg?.message || 'WhatsApp auth failed';
     console.error(`[WA:${key}] Auth failure:`, state.lastError);
   });
 
   state.client.on('disconnected', () => {
     state.isReady = false;
+    state.isAuthenticated = false;
     state.lastError = 'WhatsApp disconnected';
     console.warn(`[WA:${key}] WhatsApp disconnected`);
   });
@@ -107,7 +114,7 @@ function rotateStaleQR(userId) {
   if (!key) return null;
 
   const state = getSessionState(key);
-  if (!state || state.isReady) return state;
+  if (!state || state.isReady || state.isAuthenticated) return state;
 
   const now = Date.now();
   if (!state.qrGeneratedAt || now - state.qrGeneratedAt <= QR_TTL_MS) {
@@ -199,7 +206,8 @@ app.get('/api/wa/status', requireToken, (req, res) => {
 
   res.json({
     ok: true,
-    ready: !!state?.isReady,
+    ready: !!(state?.isReady || state?.isAuthenticated),
+    connected: !!(state?.isReady || state?.isAuthenticated),
     qr: state?.qrData || null,
     last_connected_at: state?.lastConnectedAt || null,
     error: state?.lastError || null,
