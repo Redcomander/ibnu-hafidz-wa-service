@@ -39,8 +39,18 @@ function getClientConnectionState(state) {
     return false;
   }
 
-  const clientState = state.client.getState();
-  return clientState === 'CONNECTED';
+  const page = state.client.pupPage;
+  if (!page || typeof page.evaluate !== 'function') {
+    return false;
+  }
+
+  try {
+    const clientState = state.client.getState();
+    return clientState === 'CONNECTED';
+  } catch (error) {
+    console.warn(`[WA:${state.key}] connection state unavailable before client initialization:`, error.message);
+    return false;
+  }
 }
 
 function syncReadyState(state) {
