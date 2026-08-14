@@ -34,40 +34,6 @@ function normalizeUserKey(userId) {
   return cleaned || null;
 }
 
-function getClientConnectionState(state) {
-  if (!state || !state.client || typeof state.client.getState !== 'function') {
-    return false;
-  }
-
-  const page = state.client.pupPage;
-  if (!page || typeof page.evaluate !== 'function') {
-    return false;
-  }
-
-  try {
-    const clientState = state.client.getState();
-    return clientState === 'CONNECTED';
-  } catch (error) {
-    console.warn(`[WA:${state.key}] connection state unavailable before client initialization:`, error.message);
-    return false;
-  }
-}
-
-function syncReadyState(state) {
-  if (!state) return false;
-
-  if (getClientConnectionState(state)) {
-    state.isReady = true;
-    state.lastError = null;
-    if (!state.lastConnectedAt) {
-      state.lastConnectedAt = new Date().toISOString();
-    }
-    return true;
-  }
-
-  return state.isReady;
-}
-
 function createSessionState(key) {
   const sessionDir = path.join(SESSION_DIR, key);
   const state = {
@@ -141,10 +107,7 @@ function rotateStaleQR(userId) {
   if (!key) return null;
 
   const state = getSessionState(key);
-  if (!state) return null;
-
-  syncReadyState(state);
-  if (state.isReady || getClientConnectionState(state)) return state;
+  if (!state || state.isReady) return state;
 
   const now = Date.now();
   if (!state.qrGeneratedAt || now - state.qrGeneratedAt <= QR_TTL_MS) {
@@ -233,23 +196,21 @@ app.get('/health', (_, res) => {
 
 app.get('/api/wa/status', requireToken, (req, res) => {
   const state = rotateStaleQR(req.userId) || getSessionState(req.userId);
-  syncReadyState(state);
 
   res.json({
     ok: true,
-    ready: state.isReady,
-    qr: state.qrData || null,
-    last_connected_at: state.lastConnectedAt,
-    error: state.lastError || null,
+    ready: !!state?.isReady,
+    qr: state?.qrData || null,
+    last_connected_at: state?.lastConnectedAt || null,
+    error: state?.lastError || null,
     user_id: req.userId,
   });
 });
 
 app.get('/api/wa/qr', requireToken, async (req, res) => {
   const state = rotateStaleQR(req.userId) || getSessionState(req.userId);
-  syncReadyState(state);
 
-  if (!state.qrData) {
+  if (!state || !state.qrData) {
     return res.json({ ok: true, qr: null, user_id: req.userId, error: null });
   }
 
