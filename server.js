@@ -11,6 +11,37 @@ const SERVICE_TOKEN = process.env.WA_SERVICE_TOKEN || 'change-me';
 const SESSION_DIR = process.env.WA_SESSION_DIR || '.wwebjs';
 const CHROME_BIN = process.env.WA_BROWSER_PATH || '/usr/bin/chromium';
 const QR_TTL_MS = Number(process.env.WA_QR_TTL_MS || 300000);
+const DEFAULT_CHROME_ARGS = [
+  '--no-sandbox',
+  '--disable-setuid-sandbox',
+  '--disable-dev-shm-usage',
+  '--disable-gpu',
+  '--disable-software-rasterizer',
+  '--disable-extensions',
+  '--disable-background-networking',
+  '--disable-background-timer-throttling',
+  '--disable-backgrounding-occluded-windows',
+  '--disable-renderer-backgrounding',
+  '--disable-features=Translate,BackForwardCache,InterestFeedContentSuggestions',
+  '--disable-sync',
+  '--disable-translate',
+  '--disable-component-update',
+  '--disable-client-side-phishing-detection',
+  '--metrics-recording-only',
+  '--no-first-run',
+  '--no-default-browser-check',
+  '--mute-audio',
+  '--disable-hang-monitor',
+  '--disable-breakpad',
+  '--disable-crash-reporter',
+  '--disable-ipc-flooding-protection',
+  '--renderer-process-limit=1',
+  '--disable-features=AudioServiceOutOfProcess',
+  '--memory-pressure-off',
+];
+const CHROME_ARGS = (process.env.WA_BROWSER_ARGS || '')
+  ? [...DEFAULT_CHROME_ARGS, ...String(process.env.WA_BROWSER_ARGS).split(/\s+/).filter(Boolean)]
+  : DEFAULT_CHROME_ARGS;
 
 app.use(cors({ origin: true, credentials: true }));
 app.use(express.json({ limit: '2mb' }));
@@ -52,7 +83,10 @@ function createSessionState(key) {
     puppeteer: {
       headless: true,
       executablePath: fs.existsSync(CHROME_BIN) ? CHROME_BIN : undefined,
-      args: ['--no-sandbox', '--disable-setuid-sandbox', '--disable-dev-shm-usage'],
+      args: CHROME_ARGS,
+      handleSIGINT: false,
+      handleSIGTERM: false,
+      handleSIGHUP: false,
     },
   });
 
