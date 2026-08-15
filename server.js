@@ -22,7 +22,6 @@ const DEFAULT_CHROME_ARGS = [
   '--disable-software-rasterizer',
   '--disable-extensions',
   '--disable-background-networking',
-  '--single-process',
   '--disable-background-timer-throttling',
   '--disable-backgrounding-occluded-windows',
   '--disable-renderer-backgrounding',
@@ -42,6 +41,7 @@ const DEFAULT_CHROME_ARGS = [
   '--renderer-process-limit=1',
   '--disable-features=AudioServiceOutOfProcess',
   '--memory-pressure-off',
+  '--no-zygote',
 ];
 const CHROME_ARGS = (process.env.WA_BROWSER_ARGS || '')
   ? [...DEFAULT_CHROME_ARGS, ...String(process.env.WA_BROWSER_ARGS).split(/\s+/).filter(Boolean)]
