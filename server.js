@@ -43,9 +43,6 @@ const DEFAULT_CHROME_ARGS = [
   "--disable-breakpad",
   "--disable-crash-reporter",
   "--disable-ipc-flooding-protection",
-  "--renderer-process-limit=1",
-  "--single-process",
-  "--no-zygote",
 ];
 const CHROME_ARGS =
   process.env.WA_BROWSER_ARGS || ""
