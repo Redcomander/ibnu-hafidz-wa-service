@@ -9,6 +9,7 @@ const app = express();
 const PORT = Number(process.env.PORT || 3001);
 const SERVICE_TOKEN = process.env.WA_SERVICE_TOKEN || 'change-me';
 const SESSION_DIR = process.env.WA_SESSION_DIR || '.wwebjs';
+const SHARED_SESSION_KEY = process.env.WA_SHARED_SESSION_KEY || 'shared';
 const CHROME_BIN = process.env.WA_BROWSER_PATH || '/usr/bin/chromium';
 const QR_TTL_MS = Number(process.env.WA_QR_TTL_MS || 300000);
 const WA_PROTOCOL_TIMEOUT_MS = Number(process.env.WA_PROTOCOL_TIMEOUT_MS || 120000);
@@ -60,11 +61,11 @@ function sleep(ms) {
 
 function normalizeUserKey(userId) {
   if (userId === undefined || userId === null || userId === '') {
-    return null;
+    return SHARED_SESSION_KEY;
   }
 
   const cleaned = String(userId).trim();
-  return cleaned || null;
+  return cleaned || SHARED_SESSION_KEY;
 }
 
 function bindClientEvents(state, client) {
@@ -85,7 +86,8 @@ function bindClientEvents(state, client) {
     state.isAuthenticated = true;
     state.lastError = null;
     state.lastConnectedAt = new Date().toISOString();
-    console.log(`[WA:${key}] WhatsApp client is ready`);
+    state.connectedNumber = extractConnectedNumber(client);
+    console.log(`[WA:${key}] WhatsApp client is ready (${state.connectedNumber || 'unknown number'})`);
   });
 
   client.on('authenticated', () => {
@@ -93,6 +95,7 @@ function bindClientEvents(state, client) {
     state.isReady = false;
     state.isAuthenticated = true;
     state.lastError = null;
+    state.connectedNumber = extractConnectedNumber(client);
     console.log(`[WA:${key}] WhatsApp authentication succeeded, session is connected on the phone`);
   });
 
@@ -106,9 +109,25 @@ function bindClientEvents(state, client) {
   client.on('disconnected', () => {
     state.isReady = false;
     state.isAuthenticated = false;
-    state.lastError = 'WhatsApp disconnected';
-    console.warn(`[WA:${key}] WhatsApp disconnected`);
+    state.lastError = 'WhatsApp disconnected';    state.connectedNumber = null;    console.warn(`[WA:${key}] WhatsApp disconnected`);
   });
+}
+
+function extractConnectedNumber(client) {
+  if (!client || !client.info) return null;
+
+  const info = client.info;
+  const candidate =
+    info?.wid?._serialized ||
+    info?.wid?.user ||
+    info?.me?._serialized ||
+    info?.me?.user ||
+    info?.me?.number ||
+    info?.me?.id ||
+    null;
+
+  if (!candidate) return null;
+  return String(candidate).replace(/@c\.us$/i, '').replace(/[^0-9]/g, '') || null;
 }
 
 function createClientForSession(sessionDir, key) {
@@ -139,6 +158,7 @@ function createSessionState(key) {
     isAuthenticated: false,
     lastError: null,
     lastConnectedAt: null,
+    connectedNumber: null,
     client: null,
     initPromise: null,
   };
@@ -282,15 +302,7 @@ function requireToken(req, res, next) {
   }
 
   const userId = req.headers['x-user-id'] || req.headers['x-user'];
-  const normalizedUserId = normalizeUserKey(userId);
-  if (!normalizedUserId) {
-    return res.status(401).json({
-      error: 'missing_user_id',
-      message: 'X-User-ID header is required to bind the WA session to the authenticated user',
-    });
-  }
-
-  req.userId = normalizedUserId;
+  req.userId = normalizeUserKey(userId);
   next();
 }
 
@@ -306,6 +318,7 @@ app.get('/api/wa/status', requireToken, async (req, res) => {
     ready: !!(state?.isReady || state?.isAuthenticated),
     connected: !!(state?.isReady || state?.isAuthenticated),
     qr: state?.qrData || null,
+    connected_number: state?.connectedNumber || null,
     last_connected_at: state?.lastConnectedAt || null,
     error: state?.lastError || null,
     user_id: req.userId,
