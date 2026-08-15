@@ -1,54 +1,62 @@
-const fs = require('fs');
-const path = require('path');
-const express = require('express');
-const cors = require('cors');
-const qrcode = require('qrcode');
-const { Client, LocalAuth } = require('whatsapp-web.js');
+const fs = require("fs");
+const path = require("path");
+const express = require("express");
+const cors = require("cors");
+const qrcode = require("qrcode");
+const { Client, LocalAuth } = require("whatsapp-web.js");
 
 const app = express();
 const PORT = Number(process.env.PORT || 3001);
-const SERVICE_TOKEN = process.env.WA_SERVICE_TOKEN || 'change-me';
-const SESSION_DIR = process.env.WA_SESSION_DIR || '.wwebjs';
-const SHARED_SESSION_KEY = 'shared';
-const CHROME_BIN = process.env.WA_BROWSER_PATH || '/usr/bin/chromium';
+const SERVICE_TOKEN = process.env.WA_SERVICE_TOKEN || "change-me";
+const SESSION_DIR = process.env.WA_SESSION_DIR || ".wwebjs";
+const SHARED_SESSION_KEY = "shared";
+const CHROME_BIN = process.env.WA_BROWSER_PATH || "/usr/bin/chromium";
 const QR_TTL_MS = Number(process.env.WA_QR_TTL_MS || 300000);
-const WA_PROTOCOL_TIMEOUT_MS = Number(process.env.WA_PROTOCOL_TIMEOUT_MS || 300000);
-const WA_BROWSER_TIMEOUT_MS = Number(process.env.WA_BROWSER_TIMEOUT_MS || 300000);
+const WA_PROTOCOL_TIMEOUT_MS = Number(
+  process.env.WA_PROTOCOL_TIMEOUT_MS || 300000,
+);
+const WA_BROWSER_TIMEOUT_MS = Number(
+  process.env.WA_BROWSER_TIMEOUT_MS || 300000,
+);
 const WA_IDLE_SHUTDOWN_MS = Number(process.env.WA_IDLE_SHUTDOWN_MS || 180000);
 const DEFAULT_CHROME_ARGS = [
-  '--no-sandbox',
-  '--disable-setuid-sandbox',
-  '--disable-dev-shm-usage',
-  '--disable-gpu',
-  '--disable-software-rasterizer',
-  '--disable-extensions',
-  '--disable-background-networking',
-  '--disable-background-timer-throttling',
-  '--disable-backgrounding-occluded-windows',
-  '--disable-renderer-backgrounding',
-  '--disable-features=Translate,BackForwardCache,InterestFeedContentSuggestions,AudioServiceOutOfProcess,NetworkServiceInProcess,site-per-process',
-  '--disable-sync',
-  '--disable-translate',
-  '--disable-component-update',
-  '--disable-client-side-phishing-detection',
-  '--metrics-recording-only',
-  '--no-first-run',
-  '--no-default-browser-check',
-  '--mute-audio',
-  '--disable-hang-monitor',
-  '--disable-breakpad',
-  '--disable-crash-reporter',
-  '--disable-ipc-flooding-protection',
-  '--renderer-process-limit=1',
-  '--single-process',
-  '--no-zygote',
+  "--no-sandbox",
+  "--disable-setuid-sandbox",
+  "--disable-dev-shm-usage",
+  "--disable-gpu",
+  "--disable-software-rasterizer",
+  "--disable-extensions",
+  "--disable-background-networking",
+  "--disable-background-timer-throttling",
+  "--disable-backgrounding-occluded-windows",
+  "--disable-renderer-backgrounding",
+  "--disable-features=Translate,BackForwardCache,InterestFeedContentSuggestions,AudioServiceOutOfProcess,NetworkServiceInProcess,site-per-process",
+  "--disable-sync",
+  "--disable-translate",
+  "--disable-component-update",
+  "--disable-client-side-phishing-detection",
+  "--metrics-recording-only",
+  "--no-first-run",
+  "--no-default-browser-check",
+  "--mute-audio",
+  "--disable-hang-monitor",
+  "--disable-breakpad",
+  "--disable-crash-reporter",
+  "--disable-ipc-flooding-protection",
+  "--renderer-process-limit=1",
+  "--single-process",
+  "--no-zygote",
 ];
-const CHROME_ARGS = (process.env.WA_BROWSER_ARGS || '')
-  ? [...DEFAULT_CHROME_ARGS, ...String(process.env.WA_BROWSER_ARGS).split(/\s+/).filter(Boolean)]
-  : DEFAULT_CHROME_ARGS;
+const CHROME_ARGS =
+  process.env.WA_BROWSER_ARGS || ""
+    ? [
+        ...DEFAULT_CHROME_ARGS,
+        ...String(process.env.WA_BROWSER_ARGS).split(/\s+/).filter(Boolean),
+      ]
+    : DEFAULT_CHROME_ARGS;
 
 app.use(cors({ origin: true, credentials: true }));
-app.use(express.json({ limit: '2mb' }));
+app.use(express.json({ limit: "2mb" }));
 
 const sessionStates = new Map();
 
@@ -61,7 +69,7 @@ function sleep(ms) {
 }
 
 function normalizeUserKey(userId) {
-  if (userId === undefined || userId === null || userId === '') {
+  if (userId === undefined || userId === null || userId === "") {
     return SHARED_SESSION_KEY;
   }
 
@@ -83,11 +91,16 @@ function touchSessionState(state) {
       try {
         const elapsed = Date.now() - (state.lastActivityAt || Date.now());
         if (elapsed >= WA_IDLE_SHUTDOWN_MS) {
-          console.warn(`[WA:${state.key}] idle timeout reached, destroying inactive browser session`);
+          console.warn(
+            `[WA:${state.key}] idle timeout reached, destroying inactive browser session`,
+          );
           await destroySessionState(state.key);
         }
       } catch (error) {
-        console.warn(`[WA:${state.key}] idle cleanup failed:`, error?.message || error);
+        console.warn(
+          `[WA:${state.key}] idle cleanup failed:`,
+          error?.message || error,
+        );
       }
     }, WA_IDLE_SHUTDOWN_MS);
   }
@@ -96,17 +109,19 @@ function touchSessionState(state) {
 function bindClientEvents(state, client) {
   const { key } = state;
 
-  client.on('qr', (qr) => {
+  client.on("qr", (qr) => {
     touchSessionState(state);
     state.qrData = qr;
     state.qrGeneratedAt = Date.now();
     state.isReady = false;
     state.isAuthenticated = false;
     state.lastError = null;
-    console.log(`[WA:${key}] QR generated, please scan with WhatsApp mobile app`);
+    console.log(
+      `[WA:${key}] QR generated, please scan with WhatsApp mobile app`,
+    );
   });
 
-  client.on('ready', () => {
+  client.on("ready", () => {
     touchSessionState(state);
     state.qrData = null;
     state.isReady = true;
@@ -114,32 +129,36 @@ function bindClientEvents(state, client) {
     state.lastError = null;
     state.lastConnectedAt = new Date().toISOString();
     state.connectedNumber = extractConnectedNumber(client);
-    console.log(`[WA:${key}] WhatsApp client is ready (${state.connectedNumber || 'unknown number'})`);
+    console.log(
+      `[WA:${key}] WhatsApp client is ready (${state.connectedNumber || "unknown number"})`,
+    );
   });
 
-  client.on('authenticated', () => {
+  client.on("authenticated", () => {
     touchSessionState(state);
     state.qrData = null;
     state.isReady = false;
     state.isAuthenticated = true;
     state.lastError = null;
     state.connectedNumber = extractConnectedNumber(client);
-    console.log(`[WA:${key}] WhatsApp authentication succeeded, session is connected on the phone`);
+    console.log(
+      `[WA:${key}] WhatsApp authentication succeeded, session is connected on the phone`,
+    );
   });
 
-  client.on('auth_failure', (msg) => {
+  client.on("auth_failure", (msg) => {
     touchSessionState(state);
     state.isReady = false;
     state.isAuthenticated = false;
-    state.lastError = msg?.message || 'WhatsApp auth failed';
+    state.lastError = msg?.message || "WhatsApp auth failed";
     console.error(`[WA:${key}] Auth failure:`, state.lastError);
   });
 
-  client.on('disconnected', () => {
+  client.on("disconnected", () => {
     touchSessionState(state);
     state.isReady = false;
     state.isAuthenticated = false;
-    state.lastError = 'WhatsApp disconnected';
+    state.lastError = "WhatsApp disconnected";
     state.connectedNumber = null;
     console.warn(`[WA:${key}] WhatsApp disconnected`);
   });
@@ -159,7 +178,11 @@ function extractConnectedNumber(client) {
     null;
 
   if (!candidate) return null;
-  return String(candidate).replace(/@c\.us$/i, '').replace(/[^0-9]/g, '') || null;
+  return (
+    String(candidate)
+      .replace(/@c\.us$/i, "")
+      .replace(/[^0-9]/g, "") || null
+  );
 }
 
 function createClientForSession(sessionDir, key) {
@@ -180,19 +203,38 @@ function createClientForSession(sessionDir, key) {
   return client;
 }
 
+function clearStaleSingletonLocks(sessionDir) {
+  try {
+    for (const f of fs.readdirSync(sessionDir)) {
+      if (f.startsWith("Singleton")) {
+        fs.rmSync(path.join(sessionDir, f), { force: true });
+      }
+    }
+  } catch (_) {
+    /* dir may not exist yet */
+  }
+}
+
 function createSessionState(key) {
   const sessionDir = path.join(SESSION_DIR, key);
-  const shouldResetSessionOnStart = String(process.env.WA_RESET_SESSION_ON_START || 'true').toLowerCase() !== 'false';
+  const shouldResetSessionOnStart =
+    String(process.env.WA_RESET_SESSION_ON_START || "true").toLowerCase() !==
+    "false";
 
   if (shouldResetSessionOnStart) {
     try {
       const exists = fs.existsSync(sessionDir);
       if (exists) {
         fs.rmSync(sessionDir, { recursive: true, force: true });
-        console.warn(`[WA:${key}] stale session directory removed to force fresh QR generation`);
+        console.warn(
+          `[WA:${key}] stale session directory removed to force fresh QR generation`,
+        );
       }
     } catch (error) {
-      console.warn(`[WA:${key}] failed to reset stale session directory:`, error?.message || error);
+      console.warn(
+        `[WA:${key}] failed to reset stale session directory:`,
+        error?.message || error,
+      );
     }
   }
 
@@ -230,16 +272,26 @@ async function ensureClientInitialized(state) {
 
   touchSessionState(state);
 
-  state.initPromise = state.client.initialize()
+  state.initPromise = state.client
+    .initialize()
     .then(() => {
       state.lastActivityAt = Date.now();
       return state;
     })
     .catch((error) => {
       const message = error?.message || String(error);
-      const shouldRetry = /browser is already running|Use a different `userDataDir`|already running for|Network\.enable timed out|protocolTimeout|Target closed|Execution context was destroyed/i.test(message);
+      const shouldRetry =
+        /browser is already running|Use a different `userDataDir`|already running for|Network\.enable timed out|protocolTimeout|Target closed|Execution context was destroyed/i.test(
+          message,
+        );
 
-      if (shouldRetry && !state.qrData && !state.isReady && !state.isAuthenticated && !state.retrying) {
+      if (
+        shouldRetry &&
+        !state.qrData &&
+        !state.isReady &&
+        !state.isAuthenticated &&
+        !state.retrying
+      ) {
         const now = Date.now();
         const retryCooldownMs = 30000;
 
@@ -250,18 +302,29 @@ async function ensureClientInitialized(state) {
 
         state.retrying = true;
         state.lastRetryAt = now;
-        console.warn(`[WA:${state.key}] stale or timed-out Chrome session detected, removing ${path.join(SESSION_DIR, state.key)} and retrying`);
+        console.warn(
+          `[WA:${state.key}] stale or timed-out Chrome session detected, removing ${path.join(SESSION_DIR, state.key)} and retrying`,
+        );
 
         try {
-          if (state.client && typeof state.client.destroy === 'function') {
+          if (state.client && typeof state.client.destroy === "function") {
             state.client.destroy().catch(() => {});
           }
-          fs.rmSync(path.join(SESSION_DIR, state.key), { recursive: true, force: true });
+          fs.rmSync(path.join(SESSION_DIR, state.key), {
+            recursive: true,
+            force: true,
+          });
         } catch (cleanupError) {
-          console.warn(`[WA:${state.key}] stale session cleanup failed:`, cleanupError.message);
+          console.warn(
+            `[WA:${state.key}] stale session cleanup failed:`,
+            cleanupError.message,
+          );
         }
 
-        state.client = createClientForSession(path.join(SESSION_DIR, state.key), state.key);
+        state.client = createClientForSession(
+          path.join(SESSION_DIR, state.key),
+          state.key,
+        );
         bindClientEvents(state, state.client);
         state.retrying = false;
         return state.client.initialize();
@@ -272,7 +335,10 @@ async function ensureClientInitialized(state) {
     })
     .catch((error) => {
       const message = error?.message || String(error);
-      console.error(`[WA:${state.key}] session initialization failed:`, message);
+      console.error(
+        `[WA:${state.key}] session initialization failed:`,
+        message,
+      );
       state.lastError = message;
       throw error;
     })
@@ -313,7 +379,7 @@ async function destroySessionState(key) {
   }
 
   try {
-    if (client && typeof client.destroy === 'function') {
+    if (client && typeof client.destroy === "function") {
       await client.destroy();
     }
   } catch (error) {
@@ -342,7 +408,9 @@ async function rotateStaleQR(userId) {
     return state;
   }
 
-  console.log(`[WA:${key}] QR expired after ${QR_TTL_MS}ms, recreating session`);
+  console.log(
+    `[WA:${key}] QR expired after ${QR_TTL_MS}ms, recreating session`,
+  );
   return recreateSessionState(key);
 }
 
@@ -362,10 +430,13 @@ async function simulateTyping(chat, text) {
 
   const safeText = String(text);
   const chars = safeText.length;
-  const typingDuration = Math.min(8000, Math.max(1200, chars * 45 + randomBetween(500, 1500)));
+  const typingDuration = Math.min(
+    8000,
+    Math.max(1200, chars * 45 + randomBetween(500, 1500)),
+  );
 
   try {
-    if (typeof chat.sendStateTyping === 'function') {
+    if (typeof chat.sendStateTyping === "function") {
       chat.sendStateTyping();
     }
 
@@ -379,31 +450,38 @@ async function simulateTyping(chat, text) {
       }
     }
 
-    if (typeof chat.clearState === 'function') {
+    if (typeof chat.clearState === "function") {
       chat.clearState();
     }
   } catch (error) {
-    console.warn('Typing simulation failed:', error.message);
+    console.warn("Typing simulation failed:", error.message);
   }
 }
 
 function requireToken(req, res, next) {
-  const token = req.headers['x-wa-service-token'] || req.headers['x-wa-token'];
-  if (SERVICE_TOKEN && SERVICE_TOKEN !== 'change-me' && token !== SERVICE_TOKEN) {
-    return res.status(401).json({ error: 'unauthorized', message: 'Invalid WA service token' });
+  const token = req.headers["x-wa-service-token"] || req.headers["x-wa-token"];
+  if (
+    SERVICE_TOKEN &&
+    SERVICE_TOKEN !== "change-me" &&
+    token !== SERVICE_TOKEN
+  ) {
+    return res
+      .status(401)
+      .json({ error: "unauthorized", message: "Invalid WA service token" });
   }
 
-  const userId = req.headers['x-user-id'] || req.headers['x-user'];
+  const userId = req.headers["x-user-id"] || req.headers["x-user"];
   req.userId = normalizeUserKey(userId);
   next();
 }
 
-app.get('/health', (_, res) => {
-  res.json({ ok: true, service: 'wa-service' });
+app.get("/health", (_, res) => {
+  res.json({ ok: true, service: "wa-service" });
 });
 
-app.get('/api/wa/status', requireToken, async (req, res) => {
-  const state = (await rotateStaleQR(req.userId)) || getSessionState(req.userId);
+app.get("/api/wa/status", requireToken, async (req, res) => {
+  const state =
+    (await rotateStaleQR(req.userId)) || getSessionState(req.userId);
   await ensureClientInitialized(state).catch(() => {});
   touchSessionState(state);
 
@@ -420,24 +498,38 @@ app.get('/api/wa/status', requireToken, async (req, res) => {
   });
 });
 
-app.get('/api/wa/qr', requireToken, async (req, res) => {
-  const state = (await rotateStaleQR(req.userId)) || getSessionState(req.userId);
+app.get("/api/wa/qr", requireToken, async (req, res) => {
+  const state =
+    (await rotateStaleQR(req.userId)) || getSessionState(req.userId);
   await ensureClientInitialized(state).catch(() => {});
   touchSessionState(state);
 
   if (!state || !state.qrData) {
-    return res.json({ ok: true, qr: null, session_key: SHARED_SESSION_KEY, user_id: null, error: null });
+    return res.json({
+      ok: true,
+      qr: null,
+      session_key: SHARED_SESSION_KEY,
+      user_id: null,
+      error: null,
+    });
   }
 
   try {
     const dataUrl = await qrcode.toDataURL(state.qrData);
-    return res.json({ ok: true, qr: dataUrl, session_key: SHARED_SESSION_KEY, user_id: null });
+    return res.json({
+      ok: true,
+      qr: dataUrl,
+      session_key: SHARED_SESSION_KEY,
+      user_id: null,
+    });
   } catch (error) {
-    return res.status(500).json({ error: 'qr_generation_failed', message: error.message });
+    return res
+      .status(500)
+      .json({ error: "qr_generation_failed", message: error.message });
   }
 });
 
-app.post('/api/wa/session/disconnect', requireToken, async (req, res) => {
+app.post("/api/wa/session/disconnect", requireToken, async (req, res) => {
   const state = getSessionState(req.userId);
 
   try {
@@ -447,13 +539,19 @@ app.post('/api/wa/session/disconnect', requireToken, async (req, res) => {
     state.lastConnectedAt = null;
     state.connectedNumber = null;
 
-    if (state.client && typeof state.client.logout === 'function') {
+    if (state.client && typeof state.client.logout === "function") {
       try {
         await state.client.logout();
       } catch (error) {
         const message = error?.message || String(error);
-        if (/window\.require|Execution context was destroyed|Protocol error|Network.enable timed out/i.test(message)) {
-          console.warn(`[WA:${req.userId}] logout failed due to stale browser context, forcing full session rebuild`);
+        if (
+          /window\.require|Execution context was destroyed|Protocol error|Network.enable timed out/i.test(
+            message,
+          )
+        ) {
+          console.warn(
+            `[WA:${req.userId}] logout failed due to stale browser context, forcing full session rebuild`,
+          );
         } else {
           throw error;
         }
@@ -462,44 +560,72 @@ app.post('/api/wa/session/disconnect', requireToken, async (req, res) => {
 
     await recreateSessionState(req.userId);
 
-    return res.json({ ok: true, session_key: SHARED_SESSION_KEY, user_id: null, message: 'WA session disconnected', refreshed: true });
+    return res.json({
+      ok: true,
+      session_key: SHARED_SESSION_KEY,
+      user_id: null,
+      message: "WA session disconnected",
+      refreshed: true,
+    });
   } catch (error) {
     const message = error?.message || String(error);
     console.error(`[WA:${req.userId}] disconnect failed:`, message);
-    return res.status(500).json({ error: 'disconnect_failed', message });
+    return res.status(500).json({ error: "disconnect_failed", message });
   }
 });
 
-app.post('/api/wa/send', requireToken, async (req, res) => {
+app.post("/api/wa/send", requireToken, async (req, res) => {
   try {
     const { number, text } = req.body || {};
     const state = getSessionState(req.userId);
 
     if (!number || !text) {
-      return res.status(400).json({ error: 'validation_error', message: 'number and text are required' });
+      return res
+        .status(400)
+        .json({
+          error: "validation_error",
+          message: "number and text are required",
+        });
     }
 
     if (!state.isReady || !state.client) {
-      return res.status(503).json({ error: 'wa_not_ready', message: 'WhatsApp service is not connected yet' });
+      return res
+        .status(503)
+        .json({
+          error: "wa_not_ready",
+          message: "WhatsApp service is not connected yet",
+        });
     }
 
-    const cleanNumber = String(number).replace(/\D/g, '');
+    const cleanNumber = String(number).replace(/\D/g, "");
     if (!cleanNumber) {
-      return res.status(400).json({ error: 'invalid_number', message: 'Invalid phone number' });
+      return res
+        .status(400)
+        .json({ error: "invalid_number", message: "Invalid phone number" });
     }
 
-    const normalized = cleanNumber.startsWith('62') ? cleanNumber : `62${cleanNumber}`;
+    const normalized = cleanNumber.startsWith("62")
+      ? cleanNumber
+      : `62${cleanNumber}`;
     const chatId = `${normalized}@c.us`;
 
     const chat = await state.client.getChatById(chatId).catch(() => null);
     await simulateTyping(chat, String(text));
     await state.client.sendMessage(chatId, String(text));
 
-    return res.json({ ok: true, message: 'Message sent successfully', to: normalized, session_key: SHARED_SESSION_KEY, user_id: null });
+    return res.json({
+      ok: true,
+      message: "Message sent successfully",
+      to: normalized,
+      session_key: SHARED_SESSION_KEY,
+      user_id: null,
+    });
   } catch (error) {
     const state = getSessionState(req.userId);
     state.lastError = error.message;
-    return res.status(500).json({ error: 'send_failed', message: error.message });
+    return res
+      .status(500)
+      .json({ error: "send_failed", message: error.message });
   }
 });
 
