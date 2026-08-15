@@ -143,7 +143,38 @@ function getSessionState(userId) {
   return sessionStates.get(key);
 }
 
-function rotateStaleQR(userId) {
+async function destroySessionState(key) {
+  const state = sessionStates.get(key);
+  if (!state) {
+    return null;
+  }
+
+  const client = state.client;
+  state.qrData = null;
+  state.qrGeneratedAt = null;
+  state.isReady = false;
+  state.isAuthenticated = false;
+  state.lastError = null;
+
+  try {
+    if (client && typeof client.destroy === 'function') {
+      await client.destroy();
+    }
+  } catch (error) {
+    console.warn(`[WA:${key}] destroy failed:`, error.message);
+  }
+
+  try {
+    fs.rmSync(path.join(SESSION_DIR, key), { recursive: true, force: true });
+  } catch (error) {
+    console.warn(`[WA:${key}] session cleanup failed:`, error.message);
+  }
+
+  sessionStates.delete(key);
+  return null;
+}
+
+async function rotateStaleQR(userId) {
   const key = normalizeUserKey(userId);
   if (!key) return null;
 
@@ -159,23 +190,11 @@ function rotateStaleQR(userId) {
   return recreateSessionState(key);
 }
 
-function recreateSessionState(userId) {
+async function recreateSessionState(userId) {
   const key = normalizeUserKey(userId);
-  const existing = sessionStates.get(key);
+  if (!key) return null;
 
-  if (existing && existing.client && typeof existing.client.destroy === 'function') {
-    try {
-      existing.client.destroy();
-    } catch (error) {
-      console.warn(`[WA:${key}] destroy failed:`, error.message);
-    }
-  }
-
-  try {
-    fs.rmSync(path.join(SESSION_DIR, key), { recursive: true, force: true });
-  } catch (error) {
-    console.warn(`[WA:${key}] session cleanup failed:`, error.message);
-  }
+  await destroySessionState(key);
 
   const nextState = createSessionState(key);
   sessionStates.set(key, nextState);
@@ -235,8 +254,8 @@ app.get('/health', (_, res) => {
   res.json({ ok: true, service: 'wa-service' });
 });
 
-app.get('/api/wa/status', requireToken, (req, res) => {
-  const state = rotateStaleQR(req.userId) || getSessionState(req.userId);
+app.get('/api/wa/status', requireToken, async (req, res) => {
+  const state = (await rotateStaleQR(req.userId)) || getSessionState(req.userId);
 
   res.json({
     ok: true,
@@ -250,7 +269,7 @@ app.get('/api/wa/status', requireToken, (req, res) => {
 });
 
 app.get('/api/wa/qr', requireToken, async (req, res) => {
-  const state = rotateStaleQR(req.userId) || getSessionState(req.userId);
+  const state = (await rotateStaleQR(req.userId)) || getSessionState(req.userId);
 
   if (!state || !state.qrData) {
     return res.json({ ok: true, qr: null, user_id: req.userId, error: null });
@@ -277,7 +296,7 @@ app.post('/api/wa/session/disconnect', requireToken, async (req, res) => {
       await state.client.logout();
     }
 
-    recreateSessionState(req.userId);
+    await recreateSessionState(req.userId);
 
     return res.json({ ok: true, user_id: req.userId, message: 'WA session disconnected', refreshed: true });
   } catch (error) {
