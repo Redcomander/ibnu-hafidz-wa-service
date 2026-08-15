@@ -11,6 +11,8 @@ const SERVICE_TOKEN = process.env.WA_SERVICE_TOKEN || 'change-me';
 const SESSION_DIR = process.env.WA_SESSION_DIR || '.wwebjs';
 const CHROME_BIN = process.env.WA_BROWSER_PATH || '/usr/bin/chromium';
 const QR_TTL_MS = Number(process.env.WA_QR_TTL_MS || 300000);
+const WA_PROTOCOL_TIMEOUT_MS = Number(process.env.WA_PROTOCOL_TIMEOUT_MS || 120000);
+const WA_BROWSER_TIMEOUT_MS = Number(process.env.WA_BROWSER_TIMEOUT_MS || 120000);
 const DEFAULT_CHROME_ARGS = [
   '--no-sandbox',
   '--disable-setuid-sandbox',
@@ -119,6 +121,8 @@ function createClientForSession(sessionDir, key) {
       handleSIGINT: false,
       handleSIGTERM: false,
       handleSIGHUP: false,
+      timeout: WA_BROWSER_TIMEOUT_MS,
+      protocolTimeout: WA_PROTOCOL_TIMEOUT_MS,
     },
   });
 
