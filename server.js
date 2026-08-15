@@ -9,7 +9,7 @@ const app = express();
 const PORT = Number(process.env.PORT || 3001);
 const SERVICE_TOKEN = process.env.WA_SERVICE_TOKEN || 'change-me';
 const SESSION_DIR = process.env.WA_SESSION_DIR || '.wwebjs';
-const SHARED_SESSION_KEY = process.env.WA_SHARED_SESSION_KEY || 'shared';
+const SHARED_SESSION_KEY = 'shared';
 const CHROME_BIN = process.env.WA_BROWSER_PATH || '/usr/bin/chromium';
 const QR_TTL_MS = Number(process.env.WA_QR_TTL_MS || 300000);
 const WA_PROTOCOL_TIMEOUT_MS = Number(process.env.WA_PROTOCOL_TIMEOUT_MS || 300000);
@@ -61,18 +61,12 @@ function sleep(ms) {
 }
 
 function normalizeUserKey(userId) {
-  const sharedSessionMode = String(process.env.WA_SHARED_SESSION_MODE || 'true').toLowerCase() !== 'false';
-
-  if (sharedSessionMode) {
-    return SHARED_SESSION_KEY;
-  }
-
   if (userId === undefined || userId === null || userId === '') {
     return SHARED_SESSION_KEY;
   }
 
   const cleaned = String(userId).trim();
-  return cleaned || SHARED_SESSION_KEY;
+  return cleaned ? SHARED_SESSION_KEY : SHARED_SESSION_KEY;
 }
 
 function touchSessionState(state) {
@@ -215,6 +209,8 @@ function createSessionState(key) {
     initPromise: null,
     idleTimer: null,
     lastActivityAt: Date.now(),
+    retrying: false,
+    lastRetryAt: 0,
   };
 
   const createClient = () => {
@@ -243,7 +239,17 @@ async function ensureClientInitialized(state) {
       const message = error?.message || String(error);
       const shouldRetry = /browser is already running|Use a different `userDataDir`|already running for|Network\.enable timed out|protocolTimeout|Target closed|Execution context was destroyed/i.test(message);
 
-      if (shouldRetry) {
+      if (shouldRetry && !state.qrData && !state.isReady && !state.isAuthenticated && !state.retrying) {
+        const now = Date.now();
+        const retryCooldownMs = 30000;
+
+        if (now - state.lastRetryAt < retryCooldownMs) {
+          state.lastError = message;
+          return state;
+        }
+
+        state.retrying = true;
+        state.lastRetryAt = now;
         console.warn(`[WA:${state.key}] stale or timed-out Chrome session detected, removing ${path.join(SESSION_DIR, state.key)} and retrying`);
 
         try {
@@ -257,6 +263,7 @@ async function ensureClientInitialized(state) {
 
         state.client = createClientForSession(path.join(SESSION_DIR, state.key), state.key);
         bindClientEvents(state, state.client);
+        state.retrying = false;
         return state.client.initialize();
       }
 
@@ -271,6 +278,7 @@ async function ensureClientInitialized(state) {
     })
     .finally(() => {
       state.initPromise = null;
+      state.retrying = false;
     });
 
   return state.initPromise;
@@ -407,7 +415,7 @@ app.get('/api/wa/status', requireToken, async (req, res) => {
     connected_number: state?.connectedNumber || null,
     last_connected_at: state?.lastConnectedAt || null,
     error: state?.lastError || null,
-    session_key: req.userId,
+    session_key: SHARED_SESSION_KEY,
     user_id: null,
   });
 });
@@ -418,12 +426,12 @@ app.get('/api/wa/qr', requireToken, async (req, res) => {
   touchSessionState(state);
 
   if (!state || !state.qrData) {
-    return res.json({ ok: true, qr: null, session_key: req.userId, user_id: null, error: null });
+    return res.json({ ok: true, qr: null, session_key: SHARED_SESSION_KEY, user_id: null, error: null });
   }
 
   try {
     const dataUrl = await qrcode.toDataURL(state.qrData);
-    return res.json({ ok: true, qr: dataUrl, session_key: req.userId, user_id: null });
+    return res.json({ ok: true, qr: dataUrl, session_key: SHARED_SESSION_KEY, user_id: null });
   } catch (error) {
     return res.status(500).json({ error: 'qr_generation_failed', message: error.message });
   }
@@ -454,7 +462,7 @@ app.post('/api/wa/session/disconnect', requireToken, async (req, res) => {
 
     await recreateSessionState(req.userId);
 
-    return res.json({ ok: true, session_key: req.userId, user_id: null, message: 'WA session disconnected', refreshed: true });
+    return res.json({ ok: true, session_key: SHARED_SESSION_KEY, user_id: null, message: 'WA session disconnected', refreshed: true });
   } catch (error) {
     const message = error?.message || String(error);
     console.error(`[WA:${req.userId}] disconnect failed:`, message);
@@ -487,7 +495,7 @@ app.post('/api/wa/send', requireToken, async (req, res) => {
     await simulateTyping(chat, String(text));
     await state.client.sendMessage(chatId, String(text));
 
-    return res.json({ ok: true, message: 'Message sent successfully', to: normalized, session_key: req.userId, user_id: null });
+    return res.json({ ok: true, message: 'Message sent successfully', to: normalized, session_key: SHARED_SESSION_KEY, user_id: null });
   } catch (error) {
     const state = getSessionState(req.userId);
     state.lastError = error.message;
