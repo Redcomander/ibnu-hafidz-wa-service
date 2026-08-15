@@ -157,6 +157,20 @@ function createClientForSession(sessionDir, key) {
 
 function createSessionState(key) {
   const sessionDir = path.join(SESSION_DIR, key);
+  const shouldResetSessionOnStart = String(process.env.WA_RESET_SESSION_ON_START || 'true').toLowerCase() !== 'false';
+
+  if (shouldResetSessionOnStart) {
+    try {
+      const exists = fs.existsSync(sessionDir);
+      if (exists) {
+        fs.rmSync(sessionDir, { recursive: true, force: true });
+        console.warn(`[WA:${key}] stale session directory removed to force fresh QR generation`);
+      }
+    } catch (error) {
+      console.warn(`[WA:${key}] failed to reset stale session directory:`, error?.message || error);
+    }
+  }
+
   const state = {
     key,
     qrData: null,
