@@ -14,6 +14,7 @@ const CHROME_BIN = process.env.WA_BROWSER_PATH || '/usr/bin/chromium';
 const QR_TTL_MS = Number(process.env.WA_QR_TTL_MS || 300000);
 const WA_PROTOCOL_TIMEOUT_MS = Number(process.env.WA_PROTOCOL_TIMEOUT_MS || 300000);
 const WA_BROWSER_TIMEOUT_MS = Number(process.env.WA_BROWSER_TIMEOUT_MS || 300000);
+const WA_IDLE_SHUTDOWN_MS = Number(process.env.WA_IDLE_SHUTDOWN_MS || 180000);
 const DEFAULT_CHROME_ARGS = [
   '--no-sandbox',
   '--disable-setuid-sandbox',
@@ -25,7 +26,7 @@ const DEFAULT_CHROME_ARGS = [
   '--disable-background-timer-throttling',
   '--disable-backgrounding-occluded-windows',
   '--disable-renderer-backgrounding',
-  '--disable-features=Translate,BackForwardCache,InterestFeedContentSuggestions',
+  '--disable-features=Translate,BackForwardCache,InterestFeedContentSuggestions,AudioServiceOutOfProcess,NetworkServiceInProcess,site-per-process',
   '--disable-sync',
   '--disable-translate',
   '--disable-component-update',
@@ -39,8 +40,7 @@ const DEFAULT_CHROME_ARGS = [
   '--disable-crash-reporter',
   '--disable-ipc-flooding-protection',
   '--renderer-process-limit=1',
-  '--disable-features=AudioServiceOutOfProcess',
-  '--memory-pressure-off',
+  '--single-process',
   '--no-zygote',
 ];
 const CHROME_ARGS = (process.env.WA_BROWSER_ARGS || '')
@@ -75,10 +75,35 @@ function normalizeUserKey(userId) {
   return cleaned || SHARED_SESSION_KEY;
 }
 
+function touchSessionState(state) {
+  if (!state) return;
+  state.lastActivityAt = Date.now();
+
+  if (state.idleTimer) {
+    clearTimeout(state.idleTimer);
+    state.idleTimer = null;
+  }
+
+  if (!state.isReady && !state.isAuthenticated) {
+    state.idleTimer = setTimeout(async () => {
+      try {
+        const elapsed = Date.now() - (state.lastActivityAt || Date.now());
+        if (elapsed >= WA_IDLE_SHUTDOWN_MS) {
+          console.warn(`[WA:${state.key}] idle timeout reached, destroying inactive browser session`);
+          await destroySessionState(state.key);
+        }
+      } catch (error) {
+        console.warn(`[WA:${state.key}] idle cleanup failed:`, error?.message || error);
+      }
+    }, WA_IDLE_SHUTDOWN_MS);
+  }
+}
+
 function bindClientEvents(state, client) {
   const { key } = state;
 
   client.on('qr', (qr) => {
+    touchSessionState(state);
     state.qrData = qr;
     state.qrGeneratedAt = Date.now();
     state.isReady = false;
@@ -88,6 +113,7 @@ function bindClientEvents(state, client) {
   });
 
   client.on('ready', () => {
+    touchSessionState(state);
     state.qrData = null;
     state.isReady = true;
     state.isAuthenticated = true;
@@ -98,6 +124,7 @@ function bindClientEvents(state, client) {
   });
 
   client.on('authenticated', () => {
+    touchSessionState(state);
     state.qrData = null;
     state.isReady = false;
     state.isAuthenticated = true;
@@ -107,6 +134,7 @@ function bindClientEvents(state, client) {
   });
 
   client.on('auth_failure', (msg) => {
+    touchSessionState(state);
     state.isReady = false;
     state.isAuthenticated = false;
     state.lastError = msg?.message || 'WhatsApp auth failed';
@@ -114,9 +142,12 @@ function bindClientEvents(state, client) {
   });
 
   client.on('disconnected', () => {
+    touchSessionState(state);
     state.isReady = false;
     state.isAuthenticated = false;
-    state.lastError = 'WhatsApp disconnected';    state.connectedNumber = null;    console.warn(`[WA:${key}] WhatsApp disconnected`);
+    state.lastError = 'WhatsApp disconnected';
+    state.connectedNumber = null;
+    console.warn(`[WA:${key}] WhatsApp disconnected`);
   });
 }
 
@@ -182,6 +213,8 @@ function createSessionState(key) {
     connectedNumber: null,
     client: null,
     initPromise: null,
+    idleTimer: null,
+    lastActivityAt: Date.now(),
   };
 
   const createClient = () => {
@@ -191,24 +224,39 @@ function createSessionState(key) {
   };
 
   state.client = createClient();
+  touchSessionState(state);
+  return state;
+}
+
+async function ensureClientInitialized(state) {
+  if (!state || !state.client) return state;
+  if (state.initPromise) return state.initPromise;
+
+  touchSessionState(state);
+
   state.initPromise = state.client.initialize()
+    .then(() => {
+      state.lastActivityAt = Date.now();
+      return state;
+    })
     .catch((error) => {
       const message = error?.message || String(error);
       const shouldRetry = /browser is already running|Use a different `userDataDir`|already running for|Network\.enable timed out|protocolTimeout|Target closed|Execution context was destroyed/i.test(message);
 
       if (shouldRetry) {
-        console.warn(`[WA:${key}] stale or timed-out Chrome session detected, removing ${sessionDir} and retrying`);
+        console.warn(`[WA:${state.key}] stale or timed-out Chrome session detected, removing ${path.join(SESSION_DIR, state.key)} and retrying`);
 
         try {
           if (state.client && typeof state.client.destroy === 'function') {
             state.client.destroy().catch(() => {});
           }
-          fs.rmSync(sessionDir, { recursive: true, force: true });
+          fs.rmSync(path.join(SESSION_DIR, state.key), { recursive: true, force: true });
         } catch (cleanupError) {
-          console.warn(`[WA:${key}] stale session cleanup failed:`, cleanupError.message);
+          console.warn(`[WA:${state.key}] stale session cleanup failed:`, cleanupError.message);
         }
 
-        state.client = createClient();
+        state.client = createClientForSession(path.join(SESSION_DIR, state.key), state.key);
+        bindClientEvents(state, state.client);
         return state.client.initialize();
       }
 
@@ -217,12 +265,15 @@ function createSessionState(key) {
     })
     .catch((error) => {
       const message = error?.message || String(error);
-      console.error(`[WA:${key}] session initialization failed:`, message);
+      console.error(`[WA:${state.key}] session initialization failed:`, message);
       state.lastError = message;
       throw error;
+    })
+    .finally(() => {
+      state.initPromise = null;
     });
 
-  return state;
+  return state.initPromise;
 }
 
 function getSessionState(userId) {
@@ -246,6 +297,12 @@ async function destroySessionState(key) {
   state.isReady = false;
   state.isAuthenticated = false;
   state.lastError = null;
+  state.connectedNumber = null;
+
+  if (state.idleTimer) {
+    clearTimeout(state.idleTimer);
+    state.idleTimer = null;
+  }
 
   try {
     if (client && typeof client.destroy === 'function') {
@@ -339,6 +396,8 @@ app.get('/health', (_, res) => {
 
 app.get('/api/wa/status', requireToken, async (req, res) => {
   const state = (await rotateStaleQR(req.userId)) || getSessionState(req.userId);
+  await ensureClientInitialized(state).catch(() => {});
+  touchSessionState(state);
 
   res.json({
     ok: true,
@@ -355,6 +414,8 @@ app.get('/api/wa/status', requireToken, async (req, res) => {
 
 app.get('/api/wa/qr', requireToken, async (req, res) => {
   const state = (await rotateStaleQR(req.userId)) || getSessionState(req.userId);
+  await ensureClientInitialized(state).catch(() => {});
+  touchSessionState(state);
 
   if (!state || !state.qrData) {
     return res.json({ ok: true, qr: null, session_key: req.userId, user_id: null, error: null });
