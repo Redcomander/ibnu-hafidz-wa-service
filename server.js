@@ -12,8 +12,8 @@ const SESSION_DIR = process.env.WA_SESSION_DIR || '.wwebjs';
 const SHARED_SESSION_KEY = process.env.WA_SHARED_SESSION_KEY || 'shared';
 const CHROME_BIN = process.env.WA_BROWSER_PATH || '/usr/bin/chromium';
 const QR_TTL_MS = Number(process.env.WA_QR_TTL_MS || 300000);
-const WA_PROTOCOL_TIMEOUT_MS = Number(process.env.WA_PROTOCOL_TIMEOUT_MS || 120000);
-const WA_BROWSER_TIMEOUT_MS = Number(process.env.WA_BROWSER_TIMEOUT_MS || 120000);
+const WA_PROTOCOL_TIMEOUT_MS = Number(process.env.WA_PROTOCOL_TIMEOUT_MS || 300000);
+const WA_BROWSER_TIMEOUT_MS = Number(process.env.WA_BROWSER_TIMEOUT_MS || 300000);
 const DEFAULT_CHROME_ARGS = [
   '--no-sandbox',
   '--disable-setuid-sandbox',
@@ -22,6 +22,7 @@ const DEFAULT_CHROME_ARGS = [
   '--disable-software-rasterizer',
   '--disable-extensions',
   '--disable-background-networking',
+  '--single-process',
   '--disable-background-timer-throttling',
   '--disable-backgrounding-occluded-windows',
   '--disable-renderer-backgrounding',
@@ -60,6 +61,12 @@ function sleep(ms) {
 }
 
 function normalizeUserKey(userId) {
+  const sharedSessionMode = String(process.env.WA_SHARED_SESSION_MODE || 'true').toLowerCase() !== 'false';
+
+  if (sharedSessionMode) {
+    return SHARED_SESSION_KEY;
+  }
+
   if (userId === undefined || userId === null || userId === '') {
     return SHARED_SESSION_KEY;
   }
@@ -173,11 +180,15 @@ function createSessionState(key) {
   state.initPromise = state.client.initialize()
     .catch((error) => {
       const message = error?.message || String(error);
+      const shouldRetry = /browser is already running|Use a different `userDataDir`|already running for|Network\.enable timed out|protocolTimeout|Target closed|Execution context was destroyed/i.test(message);
 
-      if (/browser is already running|Use a different `userDataDir`|already running for/i.test(message)) {
-        console.warn(`[WA:${key}] stale Chrome session lock detected, removing ${sessionDir} and retrying`);
+      if (shouldRetry) {
+        console.warn(`[WA:${key}] stale or timed-out Chrome session detected, removing ${sessionDir} and retrying`);
 
         try {
+          if (state.client && typeof state.client.destroy === 'function') {
+            state.client.destroy().catch(() => {});
+          }
           fs.rmSync(sessionDir, { recursive: true, force: true });
         } catch (cleanupError) {
           console.warn(`[WA:${key}] stale session cleanup failed:`, cleanupError.message);
@@ -191,7 +202,9 @@ function createSessionState(key) {
       throw error;
     })
     .catch((error) => {
-      console.error(`[WA:${key}] session initialization failed:`, error?.message || error);
+      const message = error?.message || String(error);
+      console.error(`[WA:${key}] session initialization failed:`, message);
+      state.lastError = message;
       throw error;
     });
 
@@ -321,7 +334,8 @@ app.get('/api/wa/status', requireToken, async (req, res) => {
     connected_number: state?.connectedNumber || null,
     last_connected_at: state?.lastConnectedAt || null,
     error: state?.lastError || null,
-    user_id: req.userId,
+    session_key: req.userId,
+    user_id: null,
   });
 });
 
@@ -329,12 +343,12 @@ app.get('/api/wa/qr', requireToken, async (req, res) => {
   const state = (await rotateStaleQR(req.userId)) || getSessionState(req.userId);
 
   if (!state || !state.qrData) {
-    return res.json({ ok: true, qr: null, user_id: req.userId, error: null });
+    return res.json({ ok: true, qr: null, session_key: req.userId, user_id: null, error: null });
   }
 
   try {
     const dataUrl = await qrcode.toDataURL(state.qrData);
-    return res.json({ ok: true, qr: dataUrl, user_id: req.userId });
+    return res.json({ ok: true, qr: dataUrl, session_key: req.userId, user_id: null });
   } catch (error) {
     return res.status(500).json({ error: 'qr_generation_failed', message: error.message });
   }
@@ -365,7 +379,7 @@ app.post('/api/wa/session/disconnect', requireToken, async (req, res) => {
 
     await recreateSessionState(req.userId);
 
-    return res.json({ ok: true, user_id: req.userId, message: 'WA session disconnected', refreshed: true });
+    return res.json({ ok: true, session_key: req.userId, user_id: null, message: 'WA session disconnected', refreshed: true });
   } catch (error) {
     const message = error?.message || String(error);
     console.error(`[WA:${req.userId}] disconnect failed:`, message);
@@ -398,7 +412,7 @@ app.post('/api/wa/send', requireToken, async (req, res) => {
     await simulateTyping(chat, String(text));
     await state.client.sendMessage(chatId, String(text));
 
-    return res.json({ ok: true, message: 'Message sent successfully', to: normalized, user_id: req.userId });
+    return res.json({ ok: true, message: 'Message sent successfully', to: normalized, session_key: req.userId, user_id: null });
   } catch (error) {
     const state = getSessionState(req.userId);
     state.lastError = error.message;
