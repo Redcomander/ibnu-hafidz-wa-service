@@ -65,20 +65,52 @@ function normalizeUserKey(userId) {
   return cleaned || null;
 }
 
-function createSessionState(key) {
-  const sessionDir = path.join(SESSION_DIR, key);
-  const state = {
-    key,
-    qrData: null,
-    qrGeneratedAt: null,
-    isReady: false,
-    isAuthenticated: false,
-    lastError: null,
-    lastConnectedAt: null,
-    client: null,
-  };
+function bindClientEvents(state, client) {
+  const { key } = state;
 
-  state.client = new Client({
+  client.on('qr', (qr) => {
+    state.qrData = qr;
+    state.qrGeneratedAt = Date.now();
+    state.isReady = false;
+    state.isAuthenticated = false;
+    state.lastError = null;
+    console.log(`[WA:${key}] QR generated, please scan with WhatsApp mobile app`);
+  });
+
+  client.on('ready', () => {
+    state.qrData = null;
+    state.isReady = true;
+    state.isAuthenticated = true;
+    state.lastError = null;
+    state.lastConnectedAt = new Date().toISOString();
+    console.log(`[WA:${key}] WhatsApp client is ready`);
+  });
+
+  client.on('authenticated', () => {
+    state.qrData = null;
+    state.isReady = false;
+    state.isAuthenticated = true;
+    state.lastError = null;
+    console.log(`[WA:${key}] WhatsApp authentication succeeded, session is connected on the phone`);
+  });
+
+  client.on('auth_failure', (msg) => {
+    state.isReady = false;
+    state.isAuthenticated = false;
+    state.lastError = msg?.message || 'WhatsApp auth failed';
+    console.error(`[WA:${key}] Auth failure:`, state.lastError);
+  });
+
+  client.on('disconnected', () => {
+    state.isReady = false;
+    state.isAuthenticated = false;
+    state.lastError = 'WhatsApp disconnected';
+    console.warn(`[WA:${key}] WhatsApp disconnected`);
+  });
+}
+
+function createClientForSession(sessionDir, key) {
+  const client = new Client({
     authStrategy: new LocalAuth({ dataPath: sessionDir }),
     puppeteer: {
       headless: true,
@@ -90,47 +122,55 @@ function createSessionState(key) {
     },
   });
 
-  state.client.on('qr', (qr) => {
-    state.qrData = qr;
-    state.qrGeneratedAt = Date.now();
-    state.isReady = false;
-    state.isAuthenticated = false;
-    state.lastError = null;
-    console.log(`[WA:${key}] QR generated, please scan with WhatsApp mobile app`);
-  });
+  return client;
+}
 
-  state.client.on('ready', () => {
-    state.qrData = null;
-    state.isReady = true;
-    state.isAuthenticated = true;
-    state.lastError = null;
-    state.lastConnectedAt = new Date().toISOString();
-    console.log(`[WA:${key}] WhatsApp client is ready`);
-  });
+function createSessionState(key) {
+  const sessionDir = path.join(SESSION_DIR, key);
+  const state = {
+    key,
+    qrData: null,
+    qrGeneratedAt: null,
+    isReady: false,
+    isAuthenticated: false,
+    lastError: null,
+    lastConnectedAt: null,
+    client: null,
+    initPromise: null,
+  };
 
-  state.client.on('authenticated', () => {
-    state.qrData = null;
-    state.isReady = false;
-    state.isAuthenticated = true;
-    state.lastError = null;
-    console.log(`[WA:${key}] WhatsApp authentication succeeded, session is connected on the phone`);
-  });
+  const createClient = () => {
+    const client = createClientForSession(sessionDir, key);
+    bindClientEvents(state, client);
+    return client;
+  };
 
-  state.client.on('auth_failure', (msg) => {
-    state.isReady = false;
-    state.isAuthenticated = false;
-    state.lastError = msg?.message || 'WhatsApp auth failed';
-    console.error(`[WA:${key}] Auth failure:`, state.lastError);
-  });
+  state.client = createClient();
+  state.initPromise = state.client.initialize()
+    .catch((error) => {
+      const message = error?.message || String(error);
 
-  state.client.on('disconnected', () => {
-    state.isReady = false;
-    state.isAuthenticated = false;
-    state.lastError = 'WhatsApp disconnected';
-    console.warn(`[WA:${key}] WhatsApp disconnected`);
-  });
+      if (/browser is already running|Use a different `userDataDir`|already running for/i.test(message)) {
+        console.warn(`[WA:${key}] stale Chrome session lock detected, removing ${sessionDir} and retrying`);
 
-  state.client.initialize();
+        try {
+          fs.rmSync(sessionDir, { recursive: true, force: true });
+        } catch (cleanupError) {
+          console.warn(`[WA:${key}] stale session cleanup failed:`, cleanupError.message);
+        }
+
+        state.client = createClient();
+        return state.client.initialize();
+      }
+
+      state.lastError = message;
+      throw error;
+    })
+    .catch((error) => {
+      console.error(`[WA:${key}] session initialization failed:`, error?.message || error);
+      throw error;
+    });
+
   return state;
 }
 
