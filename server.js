@@ -348,16 +348,28 @@ app.post('/api/wa/session/disconnect', requireToken, async (req, res) => {
     state.isReady = false;
     state.lastError = null;
     state.lastConnectedAt = null;
+    state.connectedNumber = null;
 
     if (state.client && typeof state.client.logout === 'function') {
-      await state.client.logout();
+      try {
+        await state.client.logout();
+      } catch (error) {
+        const message = error?.message || String(error);
+        if (/window\.require|Execution context was destroyed|Protocol error|Network.enable timed out/i.test(message)) {
+          console.warn(`[WA:${req.userId}] logout failed due to stale browser context, forcing full session rebuild`);
+        } else {
+          throw error;
+        }
+      }
     }
 
     await recreateSessionState(req.userId);
 
     return res.json({ ok: true, user_id: req.userId, message: 'WA session disconnected', refreshed: true });
   } catch (error) {
-    return res.status(500).json({ error: 'disconnect_failed', message: error.message });
+    const message = error?.message || String(error);
+    console.error(`[WA:${req.userId}] disconnect failed:`, message);
+    return res.status(500).json({ error: 'disconnect_failed', message });
   }
 });
 
